@@ -91,7 +91,6 @@ static bool boot_complete = false;
 static bool screen_off_processed = false;
 static bool thermal_emergency_mode = false;
 static bool power_emergency_mode = false;
-static bool full_power_mode = false;
 static bool screen_idle_mode = false;
 static bool input_handler_registered = false;
 static DEFINE_MUTEX(fg_lock);
@@ -187,14 +186,11 @@ static void apply_thermal_throttle(void);
 static unsigned int get_cpu_load(int cpu);
 static void load_config_from_file(void);
 static void free_cluster_apps(void);
-static bool is_essential_app(const char *package_name);
 static void unfreeze_all_tasks(void);
 static struct task_info *find_task_info(pid_t pid);
 static void enter_screen_idle_mode(void);
 static void exit_screen_idle_mode(void);
 static void online_all_little_cores(void);
-static int detect_app_category(const char *package_name);
-static struct app_profile *find_app_profile(const char *package_name);
 static int get_app_cluster_type(const char *package_name);
 static void schedule_app_by_cluster(struct task_struct *p, struct task_info *info, int cluster_type);
 static void schedule_normal_app(struct task_struct *p, struct task_info *info);
@@ -202,8 +198,6 @@ static void adjust_frequencies_with_power(void);
 static void update_power_statistics(void);
 static int get_cpu_temperature(void);
 static void check_thermal_status(void);
-static void full_power_work_func(struct work_struct *work);
-static void exit_full_power_mode(void);
 static void update_task_info(struct task_struct *task);
 static void schedule_screen_off_mode(void);
 static void schedule_screen_on_mode(void);
@@ -334,18 +328,6 @@ static unsigned int get_little_core_load(void)
     return count > 0 ? (total_load / count) : 0;
 }
 
-static unsigned int get_all_core_load(void)
-{
-    int cpu;
-    unsigned int total_load = 0;
-    int count = 0;
-    for_each_online_cpu(cpu) {
-        total_load += get_cpu_load(cpu);
-        count++;
-    }
-    return count > 0 ? (total_load / count) : 0;
-}
-
 static void set_cpu_freq(const cpumask_t *mask, unsigned int khz)
 {
 #ifdef CONFIG_CPU_FREQ
@@ -450,25 +432,6 @@ static bool get_package_name_safe(pid_t pid, char *buf, size_t buf_size)
     return true;
 }
 
-static bool is_essential_app(const char *package_name)
-{
-    int i;
-    if (!package_name)
-        return false;
-    for (i = 0; default_essential_apps[i] != NULL; i++) {
-        if (strstr(package_name, default_essential_apps[i])) {
-            return true;
-        }
-    }
-    if (strstr(package_name, "system") ||
-        strstr(package_name, ".provider") ||
-        strstr(package_name, ".service") ||
-        strstr(package_name, "android.")) {
-        return true;
-    }
-    return false;
-}
-
 static bool is_app_in_cluster_list(const char *package_name, char **list, int count)
 {
     int i;
@@ -484,13 +447,15 @@ static bool is_app_in_cluster_list(const char *package_name, char **list, int co
 
 static bool is_whitelisted_app(const char *package_name)
 {
+    bool result;
+    
     if (!package_name)
         return false;
     
     mutex_lock(&cluster_lock);
-    bool result = is_app_in_cluster_list(package_name, small_cluster_apps, small_count) ||
-                  is_app_in_cluster_list(package_name, large_cluster_apps, large_count) ||
-                  is_app_in_cluster_list(package_name, all_cluster_apps, all_count);
+    result = is_app_in_cluster_list(package_name, small_cluster_apps, small_count) ||
+             is_app_in_cluster_list(package_name, large_cluster_apps, large_count) ||
+             is_app_in_cluster_list(package_name, all_cluster_apps, all_count);
     mutex_unlock(&cluster_lock);
     return result;
 }
@@ -582,13 +547,15 @@ static void schedule_app_by_cluster(struct task_struct *p, struct task_info *inf
 
 static void parse_json_config(const char *buffer, ssize_t len)
 {
-    char *copy = kzalloc(len + 1, GFP_KERNEL);
-    char *ptr = copy;
+    char *copy;
     char *line;
+    char *end;
     int in_small_array = 0;
     int in_large_array = 0;
     int in_all_array = 0;
+    char *app_name;
     
+    copy = kzalloc(len + 1, GFP_KERNEL);
     if (!copy)
         return;
     
@@ -612,7 +579,7 @@ static void parse_json_config(const char *buffer, ssize_t len)
             }
             if (*line == '"') {
                 line++;
-                char *end = strchr(line, '"');
+                end = strchr(line, '"');
                 if (end) {
                     *end = '\0';
                     if (strcmp(line, "dynamic") == 0) {
@@ -683,12 +650,12 @@ static void parse_json_config(const char *buffer, ssize_t len)
         
         if (*line == '"') {
             line++;
-            char *end = strchr(line, '"');
+            end = strchr(line, '"');
             if (end) {
                 *end = '\0';
                 
                 if (strlen(line) > 0 && strlen(line) < MAX_APP_NAME_LEN) {
-                    char *app_name = kzalloc(strlen(line) + 1, GFP_KERNEL);
+                    app_name = kzalloc(strlen(line) + 1, GFP_KERNEL);
                     if (app_name) {
                         strcpy(app_name, line);
                         
@@ -934,8 +901,8 @@ static int read_temperature_from_thermal(void)
         "/sys/devices/virtual/thermal/thermal_zone0/temp",
         NULL
     };
-    
     int i;
+    
     for (i = 0; thermal_paths[i] != NULL; i++) {
         temp = read_temperature_from_file(thermal_paths[i]);
         if (temp > 0 && temp < 150) {
@@ -963,7 +930,6 @@ static int get_cpu_temperature(void)
             "soc",
             NULL
         };
-        
         struct thermal_zone_device *tz = NULL;
         int i;
         
@@ -1558,38 +1524,6 @@ static void fa_input_event(struct input_handle *handle,
     }
 }
 
-static int detect_app_category(const char *package_name)
-{
-    if (!package_name)
-        return APP_CATEGORY_BACKGROUND;
-    if (strstr(package_name, "system") ||
-        strstr(package_name, "android.") ||
-        strstr(package_name, "com.android.")) {
-        return APP_CATEGORY_SYSTEM;
-    }
-    if (strstr(package_name, ".launcher") ||
-        strstr(package_name, ".home") ||
-        strstr(package_name, "com.tencent.mm") ||
-        strstr(package_name, "com.tencent.mobileqq")) {
-        return APP_CATEGORY_INTERACTIVE;
-    }
-    return APP_CATEGORY_BACKGROUND;
-}
-
-static struct app_profile *find_app_profile(const char *package_name)
-{
-    struct app_profile *profile;
-    spin_lock(&app_profiles_lock);
-    list_for_each_entry(profile, &app_profiles, list) {
-        if (strcmp(profile->package_name, package_name) == 0) {
-            spin_unlock(&app_profiles_lock);
-            return profile;
-        }
-    }
-    spin_unlock(&app_profiles_lock);
-    return NULL;
-}
-
 static ssize_t fg_pid_show(struct kobject *k, struct kobj_attribute *a, char *buf)
 {
     return sprintf(buf, "%d\n", fg_pid);
@@ -1670,7 +1604,7 @@ static int __init fa_init(void)
     INIT_DELAYED_WORK(&power_check_work, power_check_work_func);
     INIT_DELAYED_WORK(&thermal_check_work, thermal_check_work_func);
     INIT_DELAYED_WORK(&idle_check_work, idle_check_work_func);
-    INIT_DELayed_WORK(&pid_detect_work, pid_detect_work_func);
+    INIT_DELAYED_WORK(&pid_detect_work, pid_detect_work_func);
     rc = fb_register_client(&fb_notifier);
     fa_kobj = kobject_create_and_add("frame_aware", kernel_kobj);
     if (fa_kobj) {
