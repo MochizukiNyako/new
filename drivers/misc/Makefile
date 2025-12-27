@@ -93,3 +93,7 @@ $(obj)/lkdtm_rodata_objcopy.o: $(obj)/lkdtm_rodata.o FORCE
 obj-$(CONFIG_OKL4_USER_VIPC)    += okl4-vipc.o
 obj-$(CONFIG_OKL4_GUEST)        += okl4-panic.o
 obj-$(CONFIG_OKL4_LINK_SHBUF)    += okl4-link-shbuf.o
+
+obj-$(CONFIG_POWER_CONTROL) += power_control/power_control_core.o
+obj-$(CONFIG_POWER_CONTROL) += power_control/load_manager.o
+obj-$(CONFIG_POWER_CONTROL) += power_control/frame_aware.o
