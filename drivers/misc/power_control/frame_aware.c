@@ -1524,6 +1524,52 @@ static void fa_input_event(struct input_handle *handle,
     }
 }
 
+static ssize_t application_show(struct kobject *kobj, struct kobj_attribute *attr, char *buf)
+{
+    int len = 0;
+    int i;
+    
+    len += sprintf(buf + len, "Current Mode: %s\n", current_mode == MODE_DYNAMIC ? "dynamic" : "whitelist");
+    len += sprintf(buf + len, "\nSmall Cluster Apps (%d):\n", small_count);
+    
+    mutex_lock(&cluster_lock);
+    for (i = 0; i < small_count; i++) {
+        if (small_cluster_apps[i]) {
+            len += sprintf(buf + len, "  - %s\n", small_cluster_apps[i]);
+        }
+    }
+    
+    len += sprintf(buf + len, "\nLarge Cluster Apps (%d):\n", large_count);
+    for (i = 0; i < large_count; i++) {
+        if (large_cluster_apps[i]) {
+            len += sprintf(buf + len, "  - %s\n", large_cluster_apps[i]);
+        }
+    }
+    
+    len += sprintf(buf + len, "\nAll Cluster Apps (%d):\n", all_count);
+    for (i = 0; i < all_count; i++) {
+        if (all_cluster_apps[i]) {
+            len += sprintf(buf + len, "  - %s\n", all_cluster_apps[i]);
+        }
+    }
+    mutex_unlock(&cluster_lock);
+    
+    return len;
+}
+
+static ssize_t application_store(struct kobject *kobj, struct kobj_attribute *attr, 
+                                const char *buf, size_t count)
+{
+    if (strncmp(buf, "reload", 6) == 0) {
+        load_config_from_file();
+        return count;
+    }
+    
+    return -EINVAL;
+}
+
+static struct kobj_attribute application_attr = __ATTR(application, 0644, application_show, application_store);
+
 static ssize_t fg_pid_show(struct kobject *k, struct kobj_attribute *a, char *buf)
 {
     return sprintf(buf, "%d\n", fg_pid);
@@ -1610,6 +1656,7 @@ static int __init fa_init(void)
     if (fa_kobj) {
         sysfs_create_file(fa_kobj, &fg_attr.attr);
         sysfs_create_file(fa_kobj, &power_attr.attr);
+        sysfs_create_file(fa_kobj, &application_attr.attr);
     }
     last_touch_jiffies = jiffies;
     screen_on = true;
@@ -1660,6 +1707,7 @@ static void __exit fa_exit(void)
     if (fa_kobj) {
         sysfs_remove_file(fa_kobj, &fg_attr.attr);
         sysfs_remove_file(fa_kobj, &power_attr.attr);
+        sysfs_remove_file(fa_kobj, &application_attr.attr);
         kobject_put(fa_kobj);
     }
 }
