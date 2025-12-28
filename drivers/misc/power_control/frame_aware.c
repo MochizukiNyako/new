@@ -169,18 +169,6 @@ static const char *foreground_process_patterns[] = {
     NULL
 };
 
-static const char *default_essential_apps[] = {
-    "com.android.systemui",
-    "com.android.phone",
-    "com.android.mms",
-    "com.android.providers.telephony",
-    "com.android.dialer",
-    "android.process.acore",
-    "system_server",
-    "surfaceflinger",
-    NULL
-};
-
 static void emergency_power_throttle(void);
 static void apply_thermal_throttle(void);
 static unsigned int get_cpu_load(int cpu);
@@ -1529,29 +1517,50 @@ static ssize_t application_show(struct kobject *kobj, struct kobj_attribute *att
     int len = 0;
     int i;
     
-    len += sprintf(buf + len, "Current Mode: %s\n", current_mode == MODE_DYNAMIC ? "dynamic" : "whitelist");
-    len += sprintf(buf + len, "\nSmall Cluster Apps (%d):\n", small_count);
+    len += snprintf(buf + len, PAGE_SIZE - len, "Current Mode: %s\n", 
+                    current_mode == MODE_DYNAMIC ? "dynamic" : "whitelist");
     
     mutex_lock(&cluster_lock);
+    
+    if (len >= PAGE_SIZE) {
+        mutex_unlock(&cluster_lock);
+        return len;
+    }
+    
+    len += snprintf(buf + len, PAGE_SIZE - len, "\nSmall Cluster Apps (%d):\n", small_count);
     for (i = 0; i < small_count; i++) {
         if (small_cluster_apps[i]) {
-            len += sprintf(buf + len, "  - %s\n", small_cluster_apps[i]);
+            if (len >= PAGE_SIZE - 10) break;
+            len += snprintf(buf + len, PAGE_SIZE - len, "  - %s\n", small_cluster_apps[i]);
         }
     }
     
-    len += sprintf(buf + len, "\nLarge Cluster Apps (%d):\n", large_count);
+    if (len >= PAGE_SIZE) {
+        mutex_unlock(&cluster_lock);
+        return len;
+    }
+    
+    len += snprintf(buf + len, PAGE_SIZE - len, "\nLarge Cluster Apps (%d):\n", large_count);
     for (i = 0; i < large_count; i++) {
         if (large_cluster_apps[i]) {
-            len += sprintf(buf + len, "  - %s\n", large_cluster_apps[i]);
+            if (len >= PAGE_SIZE - 10) break;
+            len += snprintf(buf + len, PAGE_SIZE - len, "  - %s\n", large_cluster_apps[i]);
         }
     }
     
-    len += sprintf(buf + len, "\nAll Cluster Apps (%d):\n", all_count);
+    if (len >= PAGE_SIZE) {
+        mutex_unlock(&cluster_lock);
+        return len;
+    }
+    
+    len += snprintf(buf + len, PAGE_SIZE - len, "\nAll Cluster Apps (%d):\n", all_count);
     for (i = 0; i < all_count; i++) {
         if (all_cluster_apps[i]) {
-            len += sprintf(buf + len, "  - %s\n", all_cluster_apps[i]);
+            if (len >= PAGE_SIZE - 10) break;
+            len += snprintf(buf + len, PAGE_SIZE - len, "  - %s\n", all_cluster_apps[i]);
         }
     }
+    
     mutex_unlock(&cluster_lock);
     
     return len;
@@ -1572,7 +1581,7 @@ static struct kobj_attribute application_attr = __ATTR(application, 0644, applic
 
 static ssize_t fg_pid_show(struct kobject *k, struct kobj_attribute *a, char *buf)
 {
-    return sprintf(buf, "%d\n", fg_pid);
+    return snprintf(buf, PAGE_SIZE, "%d\n", fg_pid);
 }
 
 static ssize_t fg_pid_store(struct kobject *k, struct kobj_attribute *a,
@@ -1597,28 +1606,45 @@ static ssize_t power_monitor_show(struct kobject *k, struct kobj_attribute *a, c
     unsigned int avg_milliwatts = (avg_power_uw % 1000000) / 1000;
     unsigned int max_watts = max_power_uw / 1000000;
     unsigned int max_milliwatts = (max_power_uw % 1000000) / 1000;
-    len += sprintf(buf + len, "Current Power: %lu uW\n", last_power_uw);
-    len += sprintf(buf + len, "Average Power: %u.%03u W\n",
-                   avg_watts, avg_milliwatts);
-    len += sprintf(buf + len, "Max Power: %u.%03u W\n",
-                   max_watts, max_milliwatts);
-    len += sprintf(buf + len, "Power Emergency Mode: %s\n",
-                   power_emergency_mode ? "Yes" : "No");
-    len += sprintf(buf + len, "Temperature: %d°C\n",
-                   last_temperature);
-    len += sprintf(buf + len, "Thermal Emergency Mode: %s\n",
-                   thermal_emergency_mode ? "Yes" : "No");
-    len += sprintf(buf + len, "Screen State: %s\n",
-                   screen_on ? "On" : "Off");
-    len += sprintf(buf + len, "Screen Off Processed: %s\n",
-                   screen_off_processed ? "Yes" : "No");
-    len += sprintf(buf + len, "Screen Idle Mode: %s\n",
-                   screen_idle_mode ? "Yes" : "No");
-    len += sprintf(buf + len, "Scheduler Mode: %s\n",
-                   current_mode == MODE_DYNAMIC ? "Dynamic" : "Whitelist");
-    len += sprintf(buf + len, "Small Cluster Apps: %d\n", small_count);
-    len += sprintf(buf + len, "Large Cluster Apps: %d\n", large_count);
-    len += sprintf(buf + len, "All Cluster Apps: %d\n", all_count);
+    
+    len += snprintf(buf + len, PAGE_SIZE - len, "Current Power: %lu uW\n", last_power_uw);
+    if (len >= PAGE_SIZE) return len;
+    
+    len += snprintf(buf + len, PAGE_SIZE - len, "Average Power: %u.%03u W\n", avg_watts, avg_milliwatts);
+    if (len >= PAGE_SIZE) return len;
+    
+    len += snprintf(buf + len, PAGE_SIZE - len, "Max Power: %u.%03u W\n", max_watts, max_milliwatts);
+    if (len >= PAGE_SIZE) return len;
+    
+    len += snprintf(buf + len, PAGE_SIZE - len, "Power Emergency Mode: %s\n", power_emergency_mode ? "Yes" : "No");
+    if (len >= PAGE_SIZE) return len;
+    
+    len += snprintf(buf + len, PAGE_SIZE - len, "Temperature: %d°C\n", last_temperature);
+    if (len >= PAGE_SIZE) return len;
+    
+    len += snprintf(buf + len, PAGE_SIZE - len, "Thermal Emergency Mode: %s\n", thermal_emergency_mode ? "Yes" : "No");
+    if (len >= PAGE_SIZE) return len;
+    
+    len += snprintf(buf + len, PAGE_SIZE - len, "Screen State: %s\n", screen_on ? "On" : "Off");
+    if (len >= PAGE_SIZE) return len;
+    
+    len += snprintf(buf + len, PAGE_SIZE - len, "Screen Off Processed: %s\n", screen_off_processed ? "Yes" : "No");
+    if (len >= PAGE_SIZE) return len;
+    
+    len += snprintf(buf + len, PAGE_SIZE - len, "Screen Idle Mode: %s\n", screen_idle_mode ? "Yes" : "No");
+    if (len >= PAGE_SIZE) return len;
+    
+    len += snprintf(buf + len, PAGE_SIZE - len, "Scheduler Mode: %s\n", current_mode == MODE_DYNAMIC ? "Dynamic" : "Whitelist");
+    if (len >= PAGE_SIZE) return len;
+    
+    len += snprintf(buf + len, PAGE_SIZE - len, "Small Cluster Apps: %d\n", small_count);
+    if (len >= PAGE_SIZE) return len;
+    
+    len += snprintf(buf + len, PAGE_SIZE - len, "Large Cluster Apps: %d\n", large_count);
+    if (len >= PAGE_SIZE) return len;
+    
+    len += snprintf(buf + len, PAGE_SIZE - len, "All Cluster Apps: %d\n", all_count);
+    
     return len;
 }
 
