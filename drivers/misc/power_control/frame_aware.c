@@ -169,6 +169,18 @@ static const char *foreground_process_patterns[] = {
     NULL
 };
 
+static const char *default_essential_apps[] = {
+    "com.android.systemui",
+    "com.android.phone",
+    "com.android.mms",
+    "com.android.providers.telephony",
+    "com.android.dialer",
+    "android.process.acore",
+    "system_server",
+    "surfaceflinger",
+    NULL
+};
+
 static void emergency_power_throttle(void);
 static void apply_thermal_throttle(void);
 static unsigned int get_cpu_load(int cpu);
@@ -179,6 +191,7 @@ static struct task_info *find_task_info(pid_t pid);
 static void enter_screen_idle_mode(void);
 static void exit_screen_idle_mode(void);
 static void online_all_little_cores(void);
+static void offline_all_little_cores(void);
 static int get_app_cluster_type(const char *package_name);
 static void schedule_app_by_cluster(struct task_struct *p, struct task_info *info, int cluster_type);
 static void schedule_normal_app(struct task_struct *p, struct task_info *info);
@@ -241,7 +254,12 @@ static void init_masks(void)
             cpumask_set_cpu(i, &big_mask);
     }
     cpumask_copy(&all_mask, cpu_possible_mask);
-    cpumask_copy(&screen_off_mask, &little_mask);
+    
+    cpumask_clear(&screen_off_mask);
+    for (i = BIG_START; i <= BIG_START + 1; i++) {
+        if (cpu_possible(i))
+            cpumask_set_cpu(i, &screen_off_mask);
+    }
 }
 
 static unsigned int get_cpu_load(int cpu)
@@ -352,6 +370,31 @@ static void online_all_little_cores(void)
     for_each_cpu(cpu, &little_mask) {
         if (!cpu_online(cpu))
             cpu_up(cpu);
+    }
+#endif
+}
+
+static void offline_all_little_cores(void)
+{
+#ifdef CONFIG_HOTPLUG_CPU
+    int cpu;
+    for_each_cpu(cpu, &little_mask) {
+        if (cpu_online(cpu) && cpu != 0)
+            cpu_down(cpu);
+    }
+#endif
+}
+
+static void online_two_big_cores(void)
+{
+#ifdef CONFIG_HOTPLUG_CPU
+    int cpu;
+    int count = 0;
+    for_each_cpu(cpu, &big_mask) {
+        if (!cpu_online(cpu) && count < 2) {
+            cpu_up(cpu);
+            count++;
+        }
     }
 #endif
 }
@@ -1022,16 +1065,26 @@ static void schedule_screen_off_mode(void)
 {
     struct task_struct *p;
     struct task_info *info;
+    
     if (screen_off_processed)
         return;
-    online_all_little_cores();
-    set_all_little_core_freq(LOCK_FREQ_KHZ);
-    set_all_big_core_freq(BIG_CORE_IDLE_FREQ_KHZ);
+    
+    offline_all_little_cores();
+    online_two_big_cores();
+    
+    set_all_little_core_freq(LITTLE_CORE_MIN_KHZ);
+    set_cpu_freq(&screen_off_mask, BIG_CORE_IDLE_FREQ_KHZ);
+    
     cancel_delayed_work(&check_work);
     cancel_delayed_work(&power_check_work);
     cancel_delayed_work(&idle_check_work);
     cancel_delayed_work(&pid_detect_work);
-    cpumask_copy(&screen_off_mask, &little_mask);
+    
+    cpumask_copy(&screen_off_mask, &big_mask);
+    cpumask_clear(&screen_off_mask);
+    cpumask_set_cpu(BIG_START, &screen_off_mask);
+    cpumask_set_cpu(BIG_START + 1, &screen_off_mask);
+    
     rcu_read_lock();
     for_each_process(p) {
         if (!p->mm || p->flags & PF_KTHREAD)
@@ -1050,6 +1103,7 @@ static void schedule_screen_off_mode(void)
         }
     }
     rcu_read_unlock();
+    
     screen_off_processed = true;
 }
 
@@ -1057,10 +1111,22 @@ static void schedule_screen_on_mode(void)
 {
     struct task_struct *p;
     struct task_info *info;
+    int i;
+    
     online_all_little_cores();
+    online_two_big_cores();
+    
     set_all_big_core_freq(BIG_CORE_MID_FREQ_KHZ);
     set_all_little_core_freq(LITTLE_CORE_MIN_KHZ);
     unfreeze_all_tasks();
+    
+    cpumask_copy(&screen_off_mask, &little_mask);
+    cpumask_clear(&screen_off_mask);
+    for (i = BIG_START; i <= BIG_START + 1; i++) {
+        if (cpu_possible(i))
+            cpumask_set_cpu(i, &screen_off_mask);
+    }
+    
     rcu_read_lock();
     for_each_process(p) {
         if (!p->mm || p->flags & PF_KTHREAD)
@@ -1072,8 +1138,10 @@ static void schedule_screen_on_mode(void)
         }
     }
     rcu_read_unlock();
+    
     screen_off_processed = false;
     screen_idle_mode = false;
+    
     if (fa_wq) {
         queue_delayed_work(fa_wq, &check_work, msecs_to_jiffies(CHECK_INTERVAL_MS));
         queue_delayed_work(fa_wq, &power_check_work,
