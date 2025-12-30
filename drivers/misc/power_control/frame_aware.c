@@ -169,18 +169,6 @@ static const char *foreground_process_patterns[] = {
     NULL
 };
 
-static const char *default_essential_apps[] = {
-    "com.android.systemui",
-    "com.android.phone",
-    "com.android.mms",
-    "com.android.providers.telephony",
-    "com.android.dialer",
-    "android.process.acore",
-    "system_server",
-    "surfaceflinger",
-    NULL
-};
-
 static void emergency_power_throttle(void);
 static void apply_thermal_throttle(void);
 static unsigned int get_cpu_load(int cpu);
@@ -256,10 +244,8 @@ static void init_masks(void)
     cpumask_copy(&all_mask, cpu_possible_mask);
     
     cpumask_clear(&screen_off_mask);
-    for (i = BIG_START; i <= BIG_START + 1; i++) {
-        if (cpu_possible(i))
-            cpumask_set_cpu(i, &screen_off_mask);
-    }
+    cpumask_set_cpu(0, &screen_off_mask);
+    cpumask_set_cpu(1, &screen_off_mask);
 }
 
 static unsigned int get_cpu_load(int cpu)
@@ -269,8 +255,13 @@ static unsigned int get_cpu_load(int cpu)
     static unsigned long prev_idle[NR_CPUS] = {0};
     unsigned long delta_total, delta_idle;
     unsigned int load = 0;
+    
+    if (!screen_on)
+        return 0;
+    
     if (cpu < 0 || cpu >= NR_CPUS)
         return 0;
+        
 #ifdef CONFIG_VIRT_CPU_ACCOUNTING_GEN
     {
         struct kernel_cpustat *kcpustat;
@@ -311,6 +302,10 @@ static unsigned int get_big_core_load(void)
     int cpu;
     unsigned int total_load = 0;
     int count = 0;
+    
+    if (!screen_on)
+        return 0;
+        
     for_each_cpu(cpu, &big_mask) {
         if (cpu_online(cpu)) {
             total_load += get_cpu_load(cpu);
@@ -325,6 +320,10 @@ static unsigned int get_little_core_load(void)
     int cpu;
     unsigned int total_load = 0;
     int count = 0;
+    
+    if (!screen_on)
+        return 0;
+        
     for_each_cpu(cpu, &little_mask) {
         if (cpu_online(cpu)) {
             total_load += get_cpu_load(cpu);
@@ -336,9 +335,13 @@ static unsigned int get_little_core_load(void)
 
 static void set_cpu_freq(const cpumask_t *mask, unsigned int khz)
 {
-#ifdef CONFIG_CPU_FREQ
     int cpu;
     struct cpufreq_policy *policy;
+    
+    if (!screen_on)
+        return;
+        
+#ifdef CONFIG_CPU_FREQ
     for_each_cpu(cpu, mask) {
         if (!cpu_online(cpu))
             continue;
@@ -385,12 +388,23 @@ static void offline_all_little_cores(void)
 #endif
 }
 
-static void online_two_big_cores(void)
+static void offline_all_big_cores(void)
+{
+#ifdef CONFIG_HOTPLUG_CPU
+    int cpu;
+    for_each_cpu(cpu, &big_mask) {
+        if (cpu_online(cpu))
+            cpu_down(cpu);
+    }
+#endif
+}
+
+static void online_two_little_cores(void)
 {
 #ifdef CONFIG_HOTPLUG_CPU
     int cpu;
     int count = 0;
-    for_each_cpu(cpu, &big_mask) {
+    for_each_cpu(cpu, &little_mask) {
         if (!cpu_online(cpu) && count < 2) {
             cpu_up(cpu);
             count++;
@@ -495,11 +509,16 @@ static void unfreeze_all_tasks(void)
 {
     struct task_struct *p;
     struct task_info *info;
+    
     spin_lock(&task_list_lock);
     list_for_each_entry(info, &task_list, list) {
         info->is_frozen = false;
     }
     spin_unlock(&task_list_lock);
+    
+    if (!screen_on)
+        return;
+        
     rcu_read_lock();
     for_each_process(p) {
         if (!p->mm || p->flags & PF_KTHREAD)
@@ -528,33 +547,28 @@ static struct task_info *find_task_info(pid_t pid)
 
 static int get_app_cluster_type(const char *package_name)
 {
+    int cluster_type = -1;
+    
     if (!package_name)
         return -1;
     
     mutex_lock(&cluster_lock);
     
     if (is_app_in_cluster_list(package_name, small_cluster_apps, small_count)) {
-        mutex_unlock(&cluster_lock);
-        return CLUSTER_TYPE_LITTLE;
-    }
-    
-    if (is_app_in_cluster_list(package_name, large_cluster_apps, large_count)) {
-        mutex_unlock(&cluster_lock);
-        return CLUSTER_TYPE_BIG;
-    }
-    
-    if (is_app_in_cluster_list(package_name, all_cluster_apps, all_count)) {
-        mutex_unlock(&cluster_lock);
-        return CLUSTER_TYPE_ALL;
+        cluster_type = CLUSTER_TYPE_LITTLE;
+    } else if (is_app_in_cluster_list(package_name, large_cluster_apps, large_count)) {
+        cluster_type = CLUSTER_TYPE_BIG;
+    } else if (is_app_in_cluster_list(package_name, all_cluster_apps, all_count)) {
+        cluster_type = CLUSTER_TYPE_ALL;
     }
     
     mutex_unlock(&cluster_lock);
-    return -1;
+    return cluster_type;
 }
 
 static void schedule_app_by_cluster(struct task_struct *p, struct task_info *info, int cluster_type)
 {
-    if (!info)
+    if (!info || !screen_on)
         return;
     
     switch (cluster_type) {
@@ -821,6 +835,10 @@ static unsigned long get_system_power_uw_simple(void)
     unsigned int freq, load;
     unsigned long coeff;
     struct cpufreq_policy *policy;
+    
+    if (!screen_on)
+        return 0;
+        
     for_each_online_cpu(cpu) {
         freq = 0;
 #ifdef CONFIG_CPU_FREQ
@@ -841,12 +859,15 @@ static unsigned long get_system_power_uw_simple(void)
 
 static void update_power_statistics(void)
 {
-    unsigned long current_power = get_system_power_uw_simple();
+    unsigned long current_power;
     unsigned long sum = 0;
     int i;
-    if (!screen_on) {
+    
+    if (!screen_on)
         return;
-    }
+        
+    current_power = get_system_power_uw_simple();
+    
     power_samples[power_sample_index] = current_power;
     power_sample_index = (power_sample_index + 1) % ARRAY_SIZE(power_samples);
     if (power_sample_count < ARRAY_SIZE(power_samples)) {
@@ -878,8 +899,13 @@ static void update_power_statistics(void)
 static void emergency_power_throttle(void)
 {
     struct task_struct *p;
+    
     set_all_little_core_freq(LOCK_FREQ_KHZ);
     set_all_big_core_freq(BIG_CORE_IDLE_FREQ_KHZ);
+    
+    if (!screen_on)
+        return;
+        
     rcu_read_lock();
     for_each_process(p) {
         if (!p->mm || p->flags & PF_KTHREAD)
@@ -1011,8 +1037,13 @@ static void check_thermal_status(void)
 static void apply_thermal_throttle(void)
 {
     struct task_struct *p;
+    
     set_all_big_core_freq(BIG_CORE_IDLE_FREQ_KHZ);
     set_all_little_core_freq(LITTLE_CORE_MIN_KHZ);
+    
+    if (!screen_on)
+        return;
+        
     rcu_read_lock();
     for_each_process(p) {
         if (!p->mm || p->flags & PF_KTHREAD)
@@ -1028,7 +1059,12 @@ static void update_task_info(struct task_struct *task)
 {
     struct task_info *info;
     char package_name[MAX_PACKAGE_NAME_LEN];
-    bool is_foreground = (task->pid == fg_pid);
+    bool is_foreground;
+    
+    if (!screen_on)
+        return;
+        
+    is_foreground = (task->pid == fg_pid);
     if (!get_package_name_safe(task->pid, package_name, sizeof(package_name))) {
         return;
     }
@@ -1069,21 +1105,14 @@ static void schedule_screen_off_mode(void)
     if (screen_off_processed)
         return;
     
+    offline_all_big_cores();
     offline_all_little_cores();
-    online_two_big_cores();
-    
-    set_all_little_core_freq(LITTLE_CORE_MIN_KHZ);
-    set_cpu_freq(&screen_off_mask, BIG_CORE_IDLE_FREQ_KHZ);
+    online_two_little_cores();
     
     cancel_delayed_work(&check_work);
     cancel_delayed_work(&power_check_work);
     cancel_delayed_work(&idle_check_work);
     cancel_delayed_work(&pid_detect_work);
-    
-    cpumask_copy(&screen_off_mask, &big_mask);
-    cpumask_clear(&screen_off_mask);
-    cpumask_set_cpu(BIG_START, &screen_off_mask);
-    cpumask_set_cpu(BIG_START + 1, &screen_off_mask);
     
     rcu_read_lock();
     for_each_process(p) {
@@ -1093,7 +1122,7 @@ static void schedule_screen_off_mode(void)
             continue;
         info = find_task_info(p->pid);
         if (info && info->is_whitelisted) {
-            set_user_nice(p, 0);
+            set_user_nice(p, 19);
             set_cpus_allowed_ptr(p, &screen_off_mask);
         } else {
             set_user_nice(p, 19);
@@ -1114,13 +1143,7 @@ static void schedule_screen_on_mode(void)
     int i;
     
     online_all_little_cores();
-    online_two_big_cores();
     
-    set_all_big_core_freq(BIG_CORE_MID_FREQ_KHZ);
-    set_all_little_core_freq(LITTLE_CORE_MIN_KHZ);
-    unfreeze_all_tasks();
-    
-    cpumask_copy(&screen_off_mask, &little_mask);
     cpumask_clear(&screen_off_mask);
     for (i = BIG_START; i <= BIG_START + 1; i++) {
         if (cpu_possible(i))
@@ -1190,6 +1213,9 @@ static void detect_foreground_pid_safe(void)
     int i;
     int process_count = 0;
     
+    if (!screen_on)
+        return;
+        
     spin_lock(&pid_detect_lock);
     if (pid_detect_in_progress) {
         spin_unlock(&pid_detect_lock);
@@ -1243,12 +1269,16 @@ static void detect_foreground_pid_safe(void)
 
 static void schedule_normal_app(struct task_struct *p, struct task_info *info)
 {
-    unsigned long now = jiffies;
+    unsigned long now;
     unsigned long boost_end_time;
     
+    if (!screen_on)
+        return;
+        
     if (!info)
         return;
     
+    now = jiffies;
     boost_end_time = info->app_start_jiffies + msecs_to_jiffies(BOOST_DURATION_MS);
     if (time_before(now, boost_end_time)) {
         set_user_nice(p, -20);
@@ -1317,6 +1347,8 @@ static void schedule_normal_app(struct task_struct *p, struct task_info *info)
 
 static void adjust_frequencies_with_power(void)
 {
+    unsigned int little_load, big_load;
+    
     if (!screen_on) {
         return;
     }
@@ -1334,8 +1366,8 @@ static void adjust_frequencies_with_power(void)
     }
     
     if (current_mode == MODE_DYNAMIC) {
-        unsigned int little_load = get_little_core_load();
-        unsigned int big_load = get_big_core_load();
+        little_load = get_little_core_load();
+        big_load = get_big_core_load();
         
         if (little_load < 30) {
             set_all_little_core_freq(LITTLE_CORE_MIN_KHZ);
@@ -1362,7 +1394,7 @@ static void pid_detect_work_func(struct work_struct *work)
 {
     detect_foreground_pid_safe();
     
-    if (fa_wq) {
+    if (fa_wq && screen_on) {
         unsigned long interval = msecs_to_jiffies(PID_CHECK_INTERVAL_MS);
         queue_delayed_work(fa_wq, &pid_detect_work, interval);
     }
@@ -1370,16 +1402,21 @@ static void pid_detect_work_func(struct work_struct *work)
 
 static void idle_check_work_func(struct work_struct *work)
 {
-    unsigned long now = jiffies;
-    unsigned long idle_timeout = msecs_to_jiffies(IDLE_NO_TOUCH_DELAY_MS);
-    if (screen_on && !screen_idle_mode && !screen_off_processed) {
-        if (time_after(now, last_touch_jiffies + idle_timeout)) {
-            enter_screen_idle_mode();
-        } else {
-            if (fa_wq)
-                queue_delayed_work(fa_wq, &idle_check_work,
-                                  msecs_to_jiffies(IDLE_NO_TOUCH_DELAY_MS));
-        }
+    unsigned long now;
+    unsigned long idle_timeout;
+    
+    if (!screen_on || screen_idle_mode || screen_off_processed)
+        return;
+        
+    now = jiffies;
+    idle_timeout = msecs_to_jiffies(IDLE_NO_TOUCH_DELAY_MS);
+    
+    if (time_after(now, last_touch_jiffies + idle_timeout)) {
+        enter_screen_idle_mode();
+    } else {
+        if (fa_wq)
+            queue_delayed_work(fa_wq, &idle_check_work,
+                              msecs_to_jiffies(IDLE_NO_TOUCH_DELAY_MS));
     }
 }
 
@@ -1388,6 +1425,9 @@ static void check_work_func(struct work_struct *work)
     struct task_info *info, *tmp;
     struct task_struct *task;
     
+    if (!screen_on)
+        return;
+        
     rcu_read_lock();
     for_each_process(task) {
         if (!task->mm || task->flags & PF_KTHREAD)
@@ -1415,7 +1455,7 @@ static void check_work_func(struct work_struct *work)
     }
     spin_unlock(&task_list_lock);
     
-    if (fa_wq)
+    if (fa_wq && screen_on)
         queue_delayed_work(fa_wq, &check_work, msecs_to_jiffies(CHECK_INTERVAL_MS));
 }
 
@@ -1423,8 +1463,9 @@ static void boost_work_func(struct work_struct *work)
 {
     struct task_info *info;
     
-    if (fg_pid == 0)
+    if (fg_pid == 0 || !screen_on)
         return;
+        
     if (screen_idle_mode) {
         exit_screen_idle_mode();
     }
@@ -1458,7 +1499,7 @@ static void power_check_work_func(struct work_struct *work)
 {
     if (screen_on) {
         update_power_statistics();
-        if (fa_wq)
+        if (fa_wq && screen_on)
             queue_delayed_work(fa_wq, &power_check_work,
                               msecs_to_jiffies(POWER_CHECK_INTERVAL_MS));
     }
@@ -1467,7 +1508,7 @@ static void power_check_work_func(struct work_struct *work)
 static void thermal_check_work_func(struct work_struct *work)
 {
     check_thermal_status();
-    if (fa_wq)
+    if (fa_wq && screen_on)
         queue_delayed_work(fa_wq, &thermal_check_work,
                           msecs_to_jiffies(5000));
 }
