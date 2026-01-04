@@ -1,20 +1,12 @@
+// SPDX-License-Identifier: GPL-2.0
 #include <linux/kernel.h>
 #include <linux/hrtimer.h>
 #include <linux/ktime.h>
 #include <linux/spinlock.h>
-#include <linux/sched.h>
 #include <linux/init.h>
-#include <linux/fb.h>
+#include <linux/types.h>
 
-struct schedtune {
-	int boost;
-};
-
-struct task_group {
-	struct schedtune schedtune;
-};
-
-extern struct task_group *schedtune_top_app_tg(void);
+extern int pc_request_temp_boost(unsigned int khz, unsigned int ms);
 
 #define FRAME_NS              16666666ULL
 #define FRAME_MISS_NS         20000000ULL
@@ -27,6 +19,17 @@ extern struct task_group *schedtune_top_app_tg(void);
 #define BOOST_MISS_MAX        50
 #define BOOST_STEP_MAX        10
 
+#define KHZ_IDLE              0
+#define KHZ_TAP               300000
+#define KHZ_SCROLL            600000
+#define KHZ_FLING             900000
+#define KHZ_MISS_MAX          1200000
+
+#define MS_TAP                30
+#define MS_SCROLL             50
+#define MS_FLING              80
+#define MS_MISS_MAX           120
+
 enum frame_state {
 	STATE_IDLE = 0,
 	STATE_TAP,
@@ -37,17 +40,12 @@ enum frame_state {
 struct frame_ctx {
 	spinlock_t lock;
 	enum frame_state state;
-
 	u64 last_frame_ns;
 	u64 last_input_ns;
-
 	int cur_boost;
 	int target_boost;
-
 	bool display_on;
-
 	struct hrtimer idle_timer;
-	struct task_group *topapp_tg;
 };
 
 static struct frame_ctx g_ctx;
@@ -63,8 +61,22 @@ static inline int clamp_boost(int cur, int target)
 
 static inline void apply_boost(int boost)
 {
-	if (g_ctx.topapp_tg)
-		g_ctx.topapp_tg->schedtune.boost = boost;
+	switch (boost) {
+	case BOOST_TAP:
+		pc_request_temp_boost(KHZ_TAP, MS_TAP);
+		break;
+	case BOOST_SCROLL:
+		pc_request_temp_boost(KHZ_SCROLL, MS_SCROLL);
+		break;
+	case BOOST_FLING:
+		pc_request_temp_boost(KHZ_FLING, MS_FLING);
+		break;
+	case BOOST_MISS_MAX:
+		pc_request_temp_boost(KHZ_MISS_MAX, MS_MISS_MAX);
+		break;
+	default:
+		break;
+	}
 }
 
 static void update_boost_locked(void)
@@ -77,11 +89,9 @@ static void update_boost_locked(void)
 static enum hrtimer_restart frame_idle_timeout(struct hrtimer *t)
 {
 	spin_lock(&g_ctx.lock);
-
 	g_ctx.state = STATE_IDLE;
 	g_ctx.target_boost = BOOST_IDLE;
-	update_boost_locked();
-
+	g_ctx.cur_boost = BOOST_IDLE;
 	spin_unlock(&g_ctx.lock);
 	return HRTIMER_NORESTART;
 }
@@ -151,10 +161,8 @@ void frame_aware_on_input(bool is_down, bool is_move)
 void frame_aware_on_binder(void)
 {
 	spin_lock(&g_ctx.lock);
-
 	frame_commit_locked(ktime_get_ns());
 	update_boost_locked();
-
 	spin_unlock(&g_ctx.lock);
 }
 
@@ -169,7 +177,6 @@ void frame_aware_on_display(bool on)
 		g_ctx.cur_boost = BOOST_IDLE;
 		g_ctx.target_boost = BOOST_IDLE;
 		hrtimer_cancel(&g_ctx.idle_timer);
-		apply_boost(BOOST_IDLE);
 	}
 
 	spin_unlock(&g_ctx.lock);
@@ -183,15 +190,11 @@ static int __init frame_aware_init(void)
 	g_ctx.cur_boost = BOOST_IDLE;
 	g_ctx.target_boost = BOOST_IDLE;
 	g_ctx.display_on = false;
+	g_ctx.last_frame_ns = 0;
+	g_ctx.last_input_ns = 0;
 
-	hrtimer_init(&g_ctx.idle_timer,
-		     CLOCK_MONOTONIC,
-		     HRTIMER_MODE_REL);
+	hrtimer_init(&g_ctx.idle_timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
 	g_ctx.idle_timer.function = frame_idle_timeout;
-
-	g_ctx.topapp_tg = schedtune_top_app_tg();
-	if (!g_ctx.topapp_tg)
-		return -ENODEV;
 
 	pr_info("frame_aware: built-in initialized\n");
 	return 0;
